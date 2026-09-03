@@ -1,0 +1,87 @@
+# =============================================================================
+#  Chatbot Lab — configuration
+# =============================================================================
+#  This file IS the lesson. Copy it to `config.yaml` and edit the parts below.
+#  Each section maps to one AI concept you'll teach during the lunch-and-learn.
+#
+#      cp config.example.yaml config.yaml
+# =============================================================================
+
+
+# ---- 1. WHERE DOES THE MODEL RUN? -------------------------------------------
+#  Pick one backend. Switch this line to compare a cloud model vs. a local one.
+#    anthropic -> Claude, hosted by Anthropic (needs an API key)
+#    openai    -> OpenAI or any OpenAI-compatible gateway (needs an API key)
+#    gemini    -> Google Gemini (needs an API key)
+#    litellm   -> a LiteLLM proxy server: one gateway in front of many models
+#    ollama    -> a model running locally on this machine (no key, no internet)
+provider: anthropic
+
+
+# ---- 2. HOW DO WE STEER THE MODEL? ------------------------------------------
+#  The system prompt sets the chatbot's persona and rules. Change it live and
+#  watch the personality change — no retraining required.
+system_prompt: |
+  You are "Lab Assistant", a friendly guide at a team lunch-and-learn.
+  Keep answers short, upbeat, and jargon-free. When you use a tool, briefly
+  say what you did so the audience can follow along.
+
+
+# ---- 3. PROVIDER SETTINGS ---------------------------------------------------
+#  Only the section matching `provider` above is used. The others are ignored,
+#  so it's safe to leave them filled in as examples.
+
+anthropic:
+  # Get a key at https://console.anthropic.com/ . You can hardcode it here, OR
+  # keep it out of the file with:   api_key: "${ANTHROPIC_API_KEY}"
+  api_key: "${ANTHROPIC_API_KEY}"
+  model: claude-sonnet-5          # try claude-opus-5 for a bigger model
+
+openai:
+  api_key: "${OPENAI_API_KEY}"
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+
+gemini:
+  # Get a key at https://aistudio.google.com/apikey
+  api_key: "${GEMINI_API_KEY}"
+  base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+  model: gemini-2.5-flash        # try gemini-2.5-pro for a bigger model
+
+litellm:
+  # A LiteLLM proxy is a single OpenAI-compatible endpoint that routes to many
+  # underlying models (Claude, GPT, Gemini, local, ...). Start one with:
+  #     pip install "litellm[proxy]"
+  #     litellm --model gpt-4o-mini        # or use a --config file
+  base_url: http://localhost:4000/v1
+  # The proxy's virtual/master key, if it requires one (else leave as-is):
+  api_key: "${LITELLM_API_KEY}"
+  # `model` must be a name your proxy is configured to serve:
+  model: gpt-4o-mini
+
+ollama:
+  # No API key needed — the model runs on this laptop.
+  #   1. Install:  https://ollama.com
+  #   2. Pull a model:  ollama pull llama3.2
+  #   3. Set provider: ollama  above
+  base_url: http://localhost:11434/v1
+  model: llama3.2                 # use a tool-capable model for MCP, e.g. llama3.1
+
+
+# ---- 4. HOW DOES THE MODEL REACH TOOLS & DATA? (MCP) ------------------------
+#  Model Context Protocol servers give the chatbot abilities beyond chatting —
+#  reading files, calling APIs, querying databases. Each entry launches a small
+#  server program; its tools automatically become available to the model.
+#
+#  Set `enabled: true` on one and watch new tools appear in the sidebar.
+#  (The examples below use `npx`, which ships with Node.js.)
+mcp_servers:
+  - name: filesystem
+    enabled: false
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+  - name: fetch
+    enabled: false
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-fetch"]

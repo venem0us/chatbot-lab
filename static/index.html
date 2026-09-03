@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chatbot Lab</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #171a21; --border: #262b36;
+      --text: #e6e9ef; --muted: #9aa4b2; --accent: #6ea8fe;
+      --user: #2b3140; --bot: #1d2430;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); height: 100vh; display: flex;
+    }
+    /* Sidebar: live view of the config — the teaching aid. */
+    aside {
+      width: 320px; flex-shrink: 0; border-right: 1px solid var(--border);
+      background: var(--panel); padding: 20px; overflow-y: auto;
+    }
+    aside h1 { font-size: 18px; margin: 0 0 4px; }
+    aside .tag { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+    .field { margin-bottom: 18px; }
+    .field .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+    .field .value { font-size: 14px; word-break: break-word; }
+    .pill { display: inline-block; background: var(--user); border: 1px solid var(--border);
+            border-radius: 999px; padding: 3px 10px; font-size: 13px; }
+    .prompt-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+                  padding: 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; max-height: 160px; overflow-y: auto; }
+    .tool { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; }
+    .tool .name { font-size: 13px; font-weight: 600; }
+    .tool .desc { font-size: 12px; color: var(--muted); }
+    .tool .srv { font-size: 11px; color: var(--accent); }
+    .empty { font-size: 13px; color: var(--muted); }
+    .err { color: #ff8f8f; font-size: 13px; margin-top: 4px; }
+
+    /* Chat area */
+    main { flex: 1; display: flex; flex-direction: column; }
+    #messages { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; }
+    .msg { max-width: 720px; padding: 12px 16px; border-radius: 12px; line-height: 1.5; white-space: pre-wrap; }
+    .msg.user { align-self: flex-end; background: var(--user); }
+    .msg.bot { align-self: flex-start; background: var(--bot); border: 1px solid var(--border); }
+    .msg.error { align-self: flex-start; background: #3a1d1d; border: 1px solid #5c2b2b; color: #ffc9c9; }
+    .composer { border-top: 1px solid var(--border); padding: 16px 24px; display: flex; gap: 10px; }
+    #input { flex: 1; resize: none; background: var(--panel); color: var(--text);
+             border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-size: 15px; font-family: inherit; }
+    button { background: var(--accent); color: #0b1220; border: 0; border-radius: 10px;
+             padding: 0 20px; font-size: 15px; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>🧪 Chatbot Lab</h1>
+    <div class="tag">Everything below comes from <code>config.yaml</code></div>
+
+    <div class="field">
+      <div class="label">Provider</div>
+      <div class="value"><span class="pill" id="provider">…</span></div>
+    </div>
+    <div class="field">
+      <div class="label">Model</div>
+      <div class="value"><span class="pill" id="model">…</span></div>
+    </div>
+    <div class="field">
+      <div class="label">System Prompt</div>
+      <div class="prompt-box" id="system-prompt">…</div>
+    </div>
+    <div class="field">
+      <div class="label">MCP Tools</div>
+      <div id="tools"><div class="empty">Loading…</div></div>
+      <div id="mcp-errors"></div>
+    </div>
+  </aside>
+
+  <main>
+    <div id="messages"></div>
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="Say something to the chatbot…"></textarea>
+      <button id="send">Send</button>
+    </div>
+  </main>
+
+  <script>
+    const messagesEl = document.getElementById("messages");
+    const inputEl = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+    const history = []; // {role, content} pairs sent to the backend
+
+    function addMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = "msg " + role;
+      div.textContent = text;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return div;
+    }
+
+    async function loadConfig() {
+      try {
+        const cfg = await (await fetch("/api/config")).json();
+        document.getElementById("provider").textContent = cfg.provider;
+        document.getElementById("model").textContent = cfg.model;
+        document.getElementById("system-prompt").textContent = cfg.system_prompt || "(none)";
+
+        const toolsEl = document.getElementById("tools");
+        toolsEl.innerHTML = "";
+        if (!cfg.tools.length) {
+          toolsEl.innerHTML = '<div class="empty">No MCP tools connected. Enable one in config.yaml.</div>';
+        } else {
+          for (const t of cfg.tools) {
+            const el = document.createElement("div");
+            el.className = "tool";
+            el.innerHTML = `<div class="name">${t.name}</div>
+                            <div class="srv">via ${t.server}</div>
+                            <div class="desc">${t.description || ""}</div>`;
+            toolsEl.appendChild(el);
+          }
+        }
+        const errEl = document.getElementById("mcp-errors");
+        errEl.innerHTML = cfg.mcp_errors.map(e => `<div class="err">⚠ ${e}</div>`).join("");
+      } catch (e) {
+        document.getElementById("provider").textContent = "config error";
+      }
+    }
+
+    async function send() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+      inputEl.value = "";
+      addMessage("user", text);
+      history.push({ role: "user", content: text });
+
+      sendBtn.disabled = true;
+      const thinking = addMessage("bot", "…");
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: history }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          thinking.remove();
+          addMessage("error", "Error: " + (data.error || res.statusText));
+        } else {
+          thinking.textContent = data.reply;
+          history.push({ role: "assistant", content: data.reply });
+        }
+      } catch (e) {
+        thinking.remove();
+        addMessage("error", "Network error: " + e.message);
+      } finally {
+        sendBtn.disabled = false;
+        inputEl.focus();
+      }
+    }
+
+    sendBtn.addEventListener("click", send);
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+
+    loadConfig();
+    inputEl.focus();
+  </script>
+</body>
+</html>
