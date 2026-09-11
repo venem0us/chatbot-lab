@@ -115,6 +115,18 @@ model *decides* to call a tool, we run it, and hand back the result. Concept:
 *this is how chatbots become agents that can actually do things.*
 (The `npx` examples need [Node.js](https://nodejs.org) installed.)
 
+### 6. See exactly what's sent to the model ("Under the hood")
+Every reply has a collapsible **Under the hood** panel. Expand it to see the raw
+JSON for that turn: the full conversation history sent to the model, any tool
+calls and their results, and each follow-up request the tool-use loop makes.
+
+**Talking point:** a chatbot is not magic — it's a growing list of messages sent
+to the model on every turn. Watch the message list get longer as the
+conversation continues, and (with a tool enabled) watch a tool call and its
+result get appended before the model is asked again. Concept: *"context" is just
+the JSON we resend each time.* Your API key is **not** in this JSON — it travels
+in an HTTP header — so the panel is safe to show on the projector.
+
 ---
 
 ## How it fits together
@@ -125,8 +137,9 @@ Browser (static/index.html)
    ▼
 FastAPI (app.py)
    ├── reads config.yaml
-   ├── talks to the model     (anthropic / openai / ollama)
-   └── runs MCP tools on demand (mcp_servers)
+   ├── talks to the model     (anthropic / openai / gemini / litellm / ollama)
+   ├── runs MCP tools on demand (mcp_servers)
+   └── returns the reply + a "trace" of the raw JSON exchanged (Under the hood)
 ```
 
 - **`app.py`** — the whole backend, ~300 readable lines, commented for teaching.
@@ -139,3 +152,8 @@ FastAPI (app.py)
 - **Ollama errors** — make sure `ollama` is running and you've `ollama pull`ed the model.
 - **MCP tool didn't appear** — check the sidebar for a ⚠ error; `npx` MCP servers
   need Node.js. Tool-calling with Ollama needs a tool-capable model (e.g. `llama3.1`).
+- **App hangs on startup after enabling the filesystem MCP server** — this was a
+  bug in the old pinned `mcp` library, which advertised support for "roots" but
+  never answered the server's `roots/list` request. Fixed: the app now answers it.
+  If you installed before the fix, refresh your dependencies:
+  `pip install -r requirements.txt` (inside your activated `.venv`).

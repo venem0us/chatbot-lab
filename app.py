@@ -17,6 +17,7 @@ Runs on Python 3.11 (tested against 3.11.15).
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import traceback
@@ -33,6 +34,7 @@ from pydantic import BaseModel
 # MCP (Model Context Protocol) client — lets the chatbot use external tools.
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.types import ListRootsResult, Root
 
 
 BASE_DIR = Path(__file__).parent
@@ -68,6 +70,40 @@ def load_config() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # 2. MCP tool manager                                                         #
 # --------------------------------------------------------------------------- #
+def _server_roots(srv: dict[str, Any]) -> list[str]:
+    """The directories to expose to a server as MCP "roots" (file:// URIs).
+
+    "Roots" are how an MCP client tells a server which folders it may work with.
+    We use the ones set explicitly in config (`roots:`), or, failing that, infer
+    them from any absolute path arguments (e.g. the "/tmp" that the filesystem
+    server is launched with). Answering the server's roots request is required —
+    the filesystem server asks for roots on startup and hangs if nobody replies.
+    """
+    raw = srv.get("roots")
+    if not raw:
+        raw = [
+            a for a in srv.get("args", [])
+            if isinstance(a, str) and not a.startswith("-")
+            and (p := Path(os.path.expanduser(a))).is_absolute() and p.exists()
+        ]
+    uris: list[str] = []
+    for r in raw:
+        s = str(r)
+        if s.startswith("file://"):
+            uris.append(s)
+        else:
+            p = Path(os.path.expanduser(s))
+            uris.append((p if p.is_absolute() else p.resolve()).as_uri())
+    return uris
+
+
+def _make_list_roots_callback(uris: list[str]):
+    """Build the handler the client uses to answer the server's roots/list."""
+    async def _list_roots(_context) -> ListRootsResult:
+        return ListRootsResult(roots=[Root(uri=u) for u in uris])
+    return _list_roots
+
+
 class MCPManager:
     """Connects to the MCP servers listed in config and exposes their tools.
 
@@ -95,7 +131,12 @@ class MCPManager:
                     env={**os.environ, **srv.get("env", {})},
                 )
                 read, write = await self._stack.enter_async_context(stdio_client(params))
-                session = await self._stack.enter_async_context(ClientSession(read, write))
+                # Register a roots handler so we answer the server's `roots/list`
+                # request. Without it, servers that use roots (e.g. filesystem)
+                # hang on startup waiting for a reply that never comes.
+                session = await self._stack.enter_async_context(
+                    ClientSession(read, write, list_roots_callback=_make_list_roots_callback(_server_roots(srv)))
+                )
                 await session.initialize()
 
                 listed = await session.list_tools()
@@ -136,8 +177,30 @@ class MCPManager:
 #                                Ollama exposes an OpenAI-compatible endpoint.
 # The chat loops below handle "tool use": the model asks to run an MCP tool,
 # we run it, hand back the result, and let the model continue.
+#
+# Each loop iteration also records a "trace" step — the exact JSON we send and
+# get back — so the web UI can show it in the "Under the hood" panel.
 
-async def chat_anthropic(cfg: dict, mcp: MCPManager, messages: list[dict]) -> str:
+# Keys we redact from the trace as a safety net. (Credentials aren't in the
+# request *body* anyway — the SDK puts the API key in an HTTP header — but this
+# guards against anything credential-shaped slipping into what we display.)
+_CRED_KEYS = {"api_key", "apikey", "authorization", "x-api-key", "access_token", "secret", "bearer"}
+
+
+def _scrub(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: ("***redacted***" if k.lower() in _CRED_KEYS else _scrub(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub(x) for x in obj]
+    return obj
+
+
+def snapshot(obj: Any) -> Any:
+    """A frozen, JSON-safe, credential-free copy for the trace panel."""
+    return _scrub(json.loads(json.dumps(obj, default=str)))
+
+
+async def chat_anthropic(cfg: dict, mcp: MCPManager, messages: list[dict], trace: list[dict]) -> str:
     from anthropic import AsyncAnthropic
 
     section = cfg.get("anthropic", {})
@@ -158,29 +221,42 @@ async def chat_anthropic(cfg: dict, mcp: MCPManager, messages: list[dict]) -> st
     convo = [{"role": m["role"], "content": m["content"]} for m in messages]
 
     while True:
-        resp = await client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=system_prompt,
-            messages=convo,
-            tools=tools or None,
-        )
+        request_body = {
+            "model": model,
+            "max_tokens": 1024,
+            "system": system_prompt,
+            "messages": convo,
+            "tools": tools or None,
+        }
+        step = {
+            "step": len(trace) + 1,
+            "kind": "initial request" if not trace else "follow-up request (after tool use)",
+            "request": snapshot(request_body),
+        }
+        trace.append(step)
+
+        resp = await client.messages.create(**request_body)
+        step["response"] = snapshot(resp.model_dump())
+
         if resp.stop_reason != "tool_use":
             return "".join(b.text for b in resp.content if b.type == "text")
 
         # Model wants to use one or more tools.
         convo.append({"role": "assistant", "content": [b.model_dump() for b in resp.content]})
         tool_results = []
+        calls = []
         for block in resp.content:
             if block.type == "tool_use":
                 output = await mcp.call_tool(block.name, block.input or {})
                 tool_results.append(
                     {"type": "tool_result", "tool_use_id": block.id, "content": output}
                 )
+                calls.append({"tool": block.name, "input": block.input or {}, "result": output})
+        step["tool_calls"] = snapshot(calls)
         convo.append({"role": "user", "content": tool_results})
 
 
-async def chat_openai_compatible(cfg: dict, mcp: MCPManager, messages: list[dict], provider: str) -> str:
+async def chat_openai_compatible(cfg: dict, mcp: MCPManager, messages: list[dict], provider: str, trace: list[dict]) -> str:
     from openai import AsyncOpenAI
 
     section = cfg.get(provider, {})
@@ -235,11 +311,17 @@ async def chat_openai_compatible(cfg: dict, mcp: MCPManager, messages: list[dict
     convo += [{"role": m["role"], "content": m["content"]} for m in messages]
 
     while True:
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=convo,
-            tools=tools or None,
-        )
+        request_body = {"model": model, "messages": convo, "tools": tools or None}
+        step = {
+            "step": len(trace) + 1,
+            "kind": "initial request" if not trace else "follow-up request (after tool use)",
+            "request": snapshot(request_body),
+        }
+        trace.append(step)
+
+        resp = await client.chat.completions.create(**request_body)
+        step["response"] = snapshot(resp.model_dump())
+
         msg = resp.choices[0].message
         if not msg.tool_calls:
             return msg.content or ""
@@ -252,20 +334,21 @@ async def chat_openai_compatible(cfg: dict, mcp: MCPManager, messages: list[dict
                 "tool_calls": [tc.model_dump() for tc in msg.tool_calls],
             }
         )
-        import json
-
+        calls = []
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments or "{}")
             output = await mcp.call_tool(tc.function.name, args)
             convo.append({"role": "tool", "tool_call_id": tc.id, "content": output})
+            calls.append({"tool": tc.function.name, "input": args, "result": output})
+        step["tool_calls"] = snapshot(calls)
 
 
-async def run_chat(app_state: "AppState", messages: list[dict]) -> str:
+async def run_chat(app_state: "AppState", messages: list[dict], trace: list[dict]) -> str:
     provider = app_state.config.get("provider", "anthropic").lower()
     if provider == "anthropic":
-        return await chat_anthropic(app_state.config, app_state.mcp, messages)
+        return await chat_anthropic(app_state.config, app_state.mcp, messages, trace)
     if provider in ("openai", "ollama", "gemini", "litellm"):
-        return await chat_openai_compatible(app_state.config, app_state.mcp, messages, provider)
+        return await chat_openai_compatible(app_state.config, app_state.mcp, messages, provider, trace)
     raise RuntimeError(
         f"Unknown provider '{provider}'. Use one of: anthropic, openai, gemini, litellm, ollama."
     )
@@ -322,13 +405,17 @@ async def get_config():
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    # `trace` captures each request/response in the tool-use loop for the
+    # "Under the hood" panel. It's returned even on error, so the UI can show
+    # exactly what was sent before things went wrong.
+    trace: list[dict] = []
     try:
-        reply = await run_chat(state, req.messages)
-        return {"reply": reply}
+        reply = await run_chat(state, req.messages, trace)
+        return {"reply": reply, "trace": trace}
     except Exception as exc:
         # Surface errors to the UI — debugging config mistakes is part of the lesson.
         traceback.print_exc()
-        return JSONResponse(status_code=400, content={"error": str(exc)})
+        return JSONResponse(status_code=400, content={"error": str(exc), "trace": trace})
 
 
 # Serve any other static assets (kept last so it doesn't shadow the API routes).

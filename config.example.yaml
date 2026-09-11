@@ -75,11 +75,16 @@ ollama:
 #
 #  Set `enabled: true` on one and watch new tools appear in the sidebar.
 #  (The examples below use `npx`, which ships with Node.js.)
+#
+#  Optional `roots:` — the folders the app grants a server access to. If you
+#  omit it, the app uses any folder paths in `args` (e.g. "/tmp" below). The
+#  app always answers the server's startup request for these.
 mcp_servers:
   - name: filesystem
     enabled: false
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    # roots: ["/tmp"]        # optional; defaults to the paths in args above
 
   - name: fetch
     enabled: false

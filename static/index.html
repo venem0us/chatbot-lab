@@ -43,6 +43,22 @@
     .msg.user { align-self: flex-end; background: var(--user); }
     .msg.bot { align-self: flex-start; background: var(--bot); border: 1px solid var(--border); }
     .msg.error { align-self: flex-start; background: #3a1d1d; border: 1px solid #5c2b2b; color: #ffc9c9; }
+
+    /* "Under the hood" trace panel — shows the raw JSON exchanged with the model. */
+    .under-hood { align-self: flex-start; max-width: 720px; width: 100%;
+                  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 4px 12px; }
+    .under-hood > summary { cursor: pointer; font-size: 13px; color: var(--accent); padding: 6px 0; list-style: none; user-select: none; }
+    .under-hood > summary::-webkit-details-marker { display: none; }
+    .under-hood > summary::before { content: "▸ "; }
+    .under-hood[open] > summary::before { content: "▾ "; }
+    .uh-note { font-size: 12px; color: var(--muted); border-left: 2px solid var(--accent); padding: 4px 10px; margin: 4px 0 10px; }
+    .uh-step { border-top: 1px solid var(--border); padding: 8px 0; }
+    .uh-h { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+    details.uh-json { margin: 4px 0; }
+    details.uh-json > summary { cursor: pointer; font-size: 13px; color: var(--text); padding: 3px 0; }
+    .uh-json pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+                   font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 1.45;
+                   color: #cdd6e4; overflow-x: auto; white-space: pre; max-height: 340px; overflow-y: auto; margin: 4px 0; }
     .composer { border-top: 1px solid var(--border); padding: 16px 24px; display: flex; gap: 10px; }
     #input { flex: 1; resize: none; background: var(--panel); color: var(--text);
              border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-size: 15px; font-family: inherit; }
@@ -126,6 +142,53 @@
       }
     }
 
+    function jsonSection(label, obj, open) {
+      const d = document.createElement("details");
+      d.className = "uh-json";
+      if (open) d.open = true;
+      const s = document.createElement("summary");
+      s.textContent = label;
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(obj, null, 2);
+      d.appendChild(s);
+      d.appendChild(pre);
+      return d;
+    }
+
+    // Build the collapsible "Under the hood" panel from a turn's trace.
+    function renderTrace(trace) {
+      const details = document.createElement("details");
+      details.className = "under-hood";
+      const summary = document.createElement("summary");
+      const n = trace.length;
+      summary.textContent = `Under the hood — ${n} request${n === 1 ? "" : "s"} to the model`;
+      details.appendChild(summary);
+
+      const note = document.createElement("div");
+      note.className = "uh-note";
+      note.textContent = "This is the exact JSON payload we send to the model, and what it sends back. " +
+        "Your API key travels in an HTTP header, not in this body, so it never appears here.";
+      details.appendChild(note);
+
+      for (const st of trace) {
+        const step = document.createElement("div");
+        step.className = "uh-step";
+        const h = document.createElement("div");
+        h.className = "uh-h";
+        h.textContent = `Step ${st.step} · ${st.kind}`;
+        step.appendChild(h);
+        step.appendChild(jsonSection("→ Request  (conversation history sent to the model)", st.request, true));
+        if (st.tool_calls && st.tool_calls.length) {
+          step.appendChild(jsonSection("🛠 Tool calls & results  (fed back on the next request)", st.tool_calls, false));
+        }
+        if (st.response) {
+          step.appendChild(jsonSection("← Response  (what the model returned)", st.response, false));
+        }
+        details.appendChild(step);
+      }
+      return details;
+    }
+
     async function send() {
       const text = inputEl.value.trim();
       if (!text) return;
@@ -144,11 +207,17 @@
         const data = await res.json();
         if (!res.ok) {
           thinking.remove();
-          addMessage("error", "Error: " + (data.error || res.statusText));
+          const errEl = addMessage("error", "Error: " + (data.error || res.statusText));
+          // Show whatever we managed to send before the error — useful for debugging.
+          if (data.trace && data.trace.length) errEl.insertAdjacentElement("afterend", renderTrace(data.trace));
         } else {
           thinking.textContent = data.reply;
           history.push({ role: "assistant", content: data.reply });
+          if (data.trace && data.trace.length) {
+            thinking.insertAdjacentElement("afterend", renderTrace(data.trace));
+          }
         }
+        messagesEl.scrollTop = messagesEl.scrollHeight;
       } catch (e) {
         thinking.remove();
         addMessage("error", "Network error: " + e.message);
