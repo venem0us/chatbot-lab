@@ -9,6 +9,8 @@ The chatbot itself just chats — the learning happens as your team edits one fi
 - **One config file** controls everything: which provider (Anthropic, OpenAI,
   Google Gemini, a LiteLLM proxy, or local Ollama), the model, the system
   prompt, and tool/data connections (MCP).
+- **Live model switching** — every model in the config shows up in a dropdown,
+  so you can compare two models in the same conversation without a restart.
 - **Python 3.11** (tested on 3.11.15).
 
 ---
@@ -86,13 +88,27 @@ system_prompt: |
 prepended to every conversation. Concept: *prompting is the cheapest way to change
 behavior.*
 
-### 4. Bigger vs. smaller models (`model`)
+### 4. Bigger vs. smaller models (`model`, `models`)
+Each provider names the model it starts on with `model:`, and can offer more
+choices with `models:`:
+
 ```yaml
 anthropic:
-  model: claude-opus-5     # vs. claude-sonnet-5
+  model: claude-sonnet-5          # the one it starts on
+  models:                         # also offered in the dropdown
+    - claude-opus-5
+    - claude-haiku-4-5-20251001
 ```
 
-**Talking point:** ask the same hard question of a small and a large model.
+Everything listed appears in the sidebar's **Model** dropdown, grouped by
+provider. Pick a different one and send another message — the switch takes
+effect immediately, no restart, and the conversation so far is kept. Models
+whose provider has no API key are still listed, marked *no API key*.
+
+**Talking point:** ask the same hard question of a small and a large model, back
+to back in one conversation, and compare the answer *and* how long it took.
+Switching provider from the same dropdown (local Ollama → hosted Claude) makes
+the point that the app doesn't change at all — only the model behind it does.
 Concept: *there's a speed/cost/quality trade-off; pick the right size for the job.*
 
 ### 5. How does a model reach tools and live data? (`mcp_servers`)

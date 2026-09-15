@@ -40,6 +40,10 @@ from mcp.types import ListRootsResult, Root
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = Path(os.environ.get("CHATBOT_CONFIG", BASE_DIR / "config.yaml"))
 
+# Every backend we know how to talk to, and which ones can't work without a key.
+PROVIDERS = ("anthropic", "openai", "gemini", "litellm", "ollama")
+KEY_REQUIRED = ("anthropic", "openai", "gemini")
+
 
 # --------------------------------------------------------------------------- #
 # 1. Configuration                                                            #
@@ -61,10 +65,63 @@ def load_config() -> dict[str, Any]:
             return os.environ.get(value[2:-1], "")
         return value
 
-    for section in ("anthropic", "openai", "gemini", "litellm", "ollama"):
+    for section in PROVIDERS:
         if isinstance(cfg.get(section), dict) and "api_key" in cfg[section]:
             cfg[section]["api_key"] = resolve_env(cfg[section]["api_key"])
     return cfg
+
+
+def model_catalog(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every provider/model pair the config offers, for the UI's model dropdown.
+
+    A provider section names its default with `model:` and may list extra
+    choices with `models:`. Both are optional; a section with neither simply
+    doesn't appear in the dropdown.
+    """
+    catalog: list[dict[str, Any]] = []
+    for provider in PROVIDERS:
+        section = cfg.get(provider)
+        if not isinstance(section, dict):
+            continue
+        names = [section["model"]] if section.get("model") else []
+        names += [n for n in (section.get("models") or [])]
+        for name in dict.fromkeys(str(n) for n in names):  # de-dupe, keep order
+            catalog.append(
+                {
+                    "id": f"{provider}:{name}",
+                    "provider": provider,
+                    "model": name,
+                    # Flagged in the dropdown so a missing key is obvious *before*
+                    # you send a message and get an error.
+                    "needs_key": provider in KEY_REQUIRED and not section.get("api_key"),
+                }
+            )
+    return catalog
+
+
+def active_model(cfg: dict[str, Any]) -> tuple[str, str]:
+    """The provider/model the config starts on — the dropdown's initial value."""
+    provider = str(cfg.get("provider", "anthropic")).lower()
+    section = cfg.get(provider) if isinstance(cfg.get(provider), dict) else {}
+    model = section.get("model") or next(iter(section.get("models") or []), "")
+    return provider, str(model)
+
+
+def resolve_model(cfg: dict[str, Any], model_id: str | None) -> tuple[str, str]:
+    """Turn a dropdown selection ("provider:model") into a provider and model.
+
+    Only pairs present in the config are accepted, so the browser can switch
+    between configured models but can't ask the server for an arbitrary one.
+    """
+    if not model_id:
+        return active_model(cfg)
+    for entry in model_catalog(cfg):
+        if entry["id"] == model_id:
+            return entry["provider"], entry["model"]
+    raise RuntimeError(
+        f"'{model_id}' isn't a model configured in config.yaml. "
+        "Add it under the provider's `models:` list."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -200,7 +257,7 @@ def snapshot(obj: Any) -> Any:
     return _scrub(json.loads(json.dumps(obj, default=str)))
 
 
-async def chat_anthropic(cfg: dict, mcp: MCPManager, messages: list[dict], trace: list[dict]) -> str:
+async def chat_anthropic(cfg: dict, mcp: MCPManager, messages: list[dict], trace: list[dict], model: str = "") -> str:
     from anthropic import AsyncAnthropic
 
     section = cfg.get("anthropic", {})
@@ -210,7 +267,7 @@ async def chat_anthropic(cfg: dict, mcp: MCPManager, messages: list[dict], trace
             "No Anthropic API key set. Add it under `anthropic.api_key` in config.yaml."
         )
     client = AsyncAnthropic(api_key=api_key)
-    model = section.get("model", "claude-sonnet-5")
+    model = model or section.get("model", "claude-sonnet-5")
     system_prompt = cfg.get("system_prompt", "")
 
     tools = [
@@ -256,9 +313,12 @@ async def chat_anthropic(cfg: dict, mcp: MCPManager, messages: list[dict], trace
         convo.append({"role": "user", "content": tool_results})
 
 
-async def chat_openai_compatible(cfg: dict, mcp: MCPManager, messages: list[dict], provider: str, trace: list[dict]) -> str:
+async def chat_openai_compatible(cfg: dict, mcp: MCPManager, messages: list[dict], provider: str, trace: list[dict], model: str = "") -> str:
     from openai import AsyncOpenAI
 
+    # `model` is the dropdown's choice; each branch below falls back to the
+    # provider's own default when nothing was picked.
+    chosen = model
     section = cfg.get(provider, {})
     if provider == "ollama":
         base_url = section.get("base_url", "http://localhost:11434/v1")
@@ -292,6 +352,7 @@ async def chat_openai_compatible(cfg: dict, mcp: MCPManager, messages: list[dict
                 "No OpenAI API key set. Add it under `openai.api_key` in config.yaml."
             )
 
+    model = chosen or model
     client = AsyncOpenAI(base_url=base_url, api_key=api_key)
     system_prompt = cfg.get("system_prompt", "")
 
@@ -343,15 +404,23 @@ async def chat_openai_compatible(cfg: dict, mcp: MCPManager, messages: list[dict
         step["tool_calls"] = snapshot(calls)
 
 
-async def run_chat(app_state: "AppState", messages: list[dict], trace: list[dict]) -> str:
-    provider = app_state.config.get("provider", "anthropic").lower()
+async def run_chat(app_state: "AppState", messages: list[dict], trace: list[dict], model_id: str | None = None) -> tuple[str, str]:
+    """Run one turn and return (reply, "provider:model" actually used).
+
+    `model_id` is the UI dropdown's selection; when it's absent we use the
+    provider and model the config file starts on.
+    """
+    cfg = app_state.config
+    provider, model = resolve_model(cfg, model_id)
     if provider == "anthropic":
-        return await chat_anthropic(app_state.config, app_state.mcp, messages, trace)
-    if provider in ("openai", "ollama", "gemini", "litellm"):
-        return await chat_openai_compatible(app_state.config, app_state.mcp, messages, provider, trace)
-    raise RuntimeError(
-        f"Unknown provider '{provider}'. Use one of: anthropic, openai, gemini, litellm, ollama."
-    )
+        reply = await chat_anthropic(cfg, app_state.mcp, messages, trace, model)
+    elif provider in ("openai", "ollama", "gemini", "litellm"):
+        reply = await chat_openai_compatible(cfg, app_state.mcp, messages, provider, trace, model)
+    else:
+        raise RuntimeError(
+            f"Unknown provider '{provider}'. Use one of: anthropic, openai, gemini, litellm, ollama."
+        )
+    return reply, f"{provider}:{model}"
 
 
 # --------------------------------------------------------------------------- #
@@ -381,6 +450,9 @@ app = FastAPI(title="Chatbot Lab", lifespan=lifespan)
 
 class ChatRequest(BaseModel):
     messages: list[dict[str, Any]]
+    # Which configured model to answer with ("provider:model"), from the
+    # sidebar dropdown. Omitted -> whatever config.yaml starts on.
+    model_id: str | None = None
 
 
 @app.get("/")
@@ -392,11 +464,13 @@ async def index():
 async def get_config():
     """Non-secret view of the active config, shown in the UI as a teaching aid."""
     cfg = state.config
-    provider = cfg.get("provider", "anthropic").lower()
-    model = (cfg.get(provider, {}) or {}).get("model", "(default)")
+    provider, model = active_model(cfg)
     return {
         "provider": provider,
-        "model": model,
+        "model": model or "(default)",
+        # Populates the model dropdown; `active_model_id` is its start value.
+        "models": model_catalog(cfg),
+        "active_model_id": f"{provider}:{model}",
         "system_prompt": cfg.get("system_prompt", ""),
         "tools": [{"server": t["server"], "name": t["name"], "description": t["description"]} for t in state.mcp.tools],
         "mcp_errors": state.mcp.errors,
@@ -410,8 +484,8 @@ async def chat(req: ChatRequest):
     # exactly what was sent before things went wrong.
     trace: list[dict] = []
     try:
-        reply = await run_chat(state, req.messages, trace)
-        return {"reply": reply, "trace": trace}
+        reply, used = await run_chat(state, req.messages, trace, req.model_id)
+        return {"reply": reply, "trace": trace, "model": used}
     except Exception as exc:
         # Surface errors to the UI — debugging config mistakes is part of the lesson.
         traceback.print_exc()

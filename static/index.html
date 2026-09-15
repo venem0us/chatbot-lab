@@ -34,6 +34,9 @@
     .tool .desc { font-size: 12px; color: var(--muted); }
     .tool .srv { font-size: 11px; color: var(--accent); }
     .empty { font-size: 13px; color: var(--muted); }
+    select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+             border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
     .err { color: #ff8f8f; font-size: 13px; margin-top: 4px; }
 
     /* Chat area */
@@ -78,7 +81,8 @@
     </div>
     <div class="field">
       <div class="label">Model</div>
-      <div class="value"><span class="pill" id="model">…</span></div>
+      <select id="model-select"><option>…</option></select>
+      <div class="hint" id="model-hint">Switching applies to your next message — no restart needed.</div>
     </div>
     <div class="field">
       <div class="label">System Prompt</div>
@@ -103,7 +107,9 @@
     const messagesEl = document.getElementById("messages");
     const inputEl = document.getElementById("input");
     const sendBtn = document.getElementById("send");
+    const modelSelect = document.getElementById("model-select");
     const history = []; // {role, content} pairs sent to the backend
+    let models = [];    // the configured provider/model pairs from /api/config
 
     function addMessage(role, text) {
       const div = document.createElement("div");
@@ -114,11 +120,47 @@
       return div;
     }
 
+    // Fill the model dropdown, one <optgroup> per provider so it's obvious which
+    // backend each model runs on.
+    function renderModels(cfg) {
+      models = cfg.models || [];
+      modelSelect.innerHTML = "";
+      if (!models.length) {
+        modelSelect.innerHTML = '<option value="">(none configured)</option>';
+        modelSelect.disabled = true;
+        return;
+      }
+      let group = null;
+      for (const m of models) {
+        if (!group || group.label !== m.provider) {
+          group = document.createElement("optgroup");
+          group.label = m.provider;
+          modelSelect.appendChild(group);
+        }
+        const opt = document.createElement("option");
+        opt.value = m.id;
+        opt.textContent = m.model + (m.needs_key ? "  — no API key" : "");
+        group.appendChild(opt);
+      }
+      modelSelect.value = cfg.active_model_id;
+      syncProviderPill();
+    }
+
+    // Keep the Provider pill and the hint in step with the dropdown.
+    function syncProviderPill() {
+      const m = models.find(x => x.id === modelSelect.value);
+      if (!m) return;
+      document.getElementById("provider").textContent = m.provider;
+      document.getElementById("model-hint").textContent = m.needs_key
+        ? `No API key set for ${m.provider} — add ${m.provider}.api_key in config.yaml.`
+        : "Switching applies to your next message — no restart needed.";
+    }
+
     async function loadConfig() {
       try {
         const cfg = await (await fetch("/api/config")).json();
         document.getElementById("provider").textContent = cfg.provider;
-        document.getElementById("model").textContent = cfg.model;
+        renderModels(cfg);
         document.getElementById("system-prompt").textContent = cfg.system_prompt || "(none)";
 
         const toolsEl = document.getElementById("tools");
@@ -156,12 +198,12 @@
     }
 
     // Build the collapsible "Under the hood" panel from a turn's trace.
-    function renderTrace(trace) {
+    function renderTrace(trace, modelId) {
       const details = document.createElement("details");
       details.className = "under-hood";
       const summary = document.createElement("summary");
       const n = trace.length;
-      summary.textContent = `Under the hood — ${n} request${n === 1 ? "" : "s"} to the model`;
+      summary.textContent = `Under the hood — ${n} request${n === 1 ? "" : "s"} to ${modelId || "the model"}`;
       details.appendChild(summary);
 
       const note = document.createElement("div");
@@ -202,19 +244,21 @@
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: history }),
+          body: JSON.stringify({ messages: history, model_id: modelSelect.value || null }),
         });
         const data = await res.json();
         if (!res.ok) {
           thinking.remove();
           const errEl = addMessage("error", "Error: " + (data.error || res.statusText));
           // Show whatever we managed to send before the error — useful for debugging.
-          if (data.trace && data.trace.length) errEl.insertAdjacentElement("afterend", renderTrace(data.trace));
+          if (data.trace && data.trace.length) {
+            errEl.insertAdjacentElement("afterend", renderTrace(data.trace, modelSelect.value));
+          }
         } else {
           thinking.textContent = data.reply;
           history.push({ role: "assistant", content: data.reply });
           if (data.trace && data.trace.length) {
-            thinking.insertAdjacentElement("afterend", renderTrace(data.trace));
+            thinking.insertAdjacentElement("afterend", renderTrace(data.trace, data.model));
           }
         }
         messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -227,6 +271,7 @@
       }
     }
 
+    modelSelect.addEventListener("change", syncProviderPill);
     sendBtn.addEventListener("click", send);
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
