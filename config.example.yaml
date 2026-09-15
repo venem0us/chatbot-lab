@@ -28,25 +28,39 @@ system_prompt: |
 
 
 # ---- 3. PROVIDER SETTINGS ---------------------------------------------------
-#  Only the section matching `provider` above is used. The others are ignored,
-#  so it's safe to leave them filled in as examples.
+#  `provider` above picks which section starts out active. Every model listed
+#  here also shows up in the sidebar's Model dropdown, so you can switch
+#  mid-conversation without restarting the server.
+#
+#    model:   the one this provider starts on
+#    models:  extra choices to offer in the dropdown (optional)
+#
+#  Models on a provider with no API key still appear, marked "no API key" —
+#  pick one to see exactly which error a missing key produces.
 
 anthropic:
   # Get a key at https://console.anthropic.com/ . You can hardcode it here, OR
   # keep it out of the file with:   api_key: "${ANTHROPIC_API_KEY}"
   api_key: "${ANTHROPIC_API_KEY}"
   model: claude-sonnet-5          # try claude-opus-5 for a bigger model
+  models:
+    - claude-opus-5
+    - claude-haiku-4-5-20251001
 
 openai:
   api_key: "${OPENAI_API_KEY}"
   base_url: https://api.openai.com/v1
   model: gpt-4o-mini
+  models:
+    - gpt-4o
 
 gemini:
   # Get a key at https://aistudio.google.com/apikey
   api_key: "${GEMINI_API_KEY}"
   base_url: https://generativelanguage.googleapis.com/v1beta/openai/
   model: gemini-2.5-flash        # try gemini-2.5-pro for a bigger model
+  models:
+    - gemini-2.5-pro
 
 litellm:
   # A LiteLLM proxy is a single OpenAI-compatible endpoint that routes to many
@@ -66,6 +80,9 @@ ollama:
   #   3. Set provider: ollama  above
   base_url: http://localhost:11434/v1
   model: llama3.2                 # use a tool-capable model for MCP, e.g. llama3.1
+  # Only list models you've actually `ollama pull`ed:
+  models:
+    - llama3.2:1b
 
 
 # ---- 4. HOW DOES THE MODEL REACH TOOLS & DATA? (MCP) ------------------------
